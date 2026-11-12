@@ -1,0 +1,6 @@
+streamlit>=1.50
+mediapipe>=0.10.30
+numpy
+pandas
+plotly
+imageio-ffmpeg

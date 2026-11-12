@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+models/*.task
+*.mp4
+*.mov
+.venv/
+.DS_Store
