@@ -32,6 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 SEV = {3: "Major", 2: "Moderate", 1: "Minor"}
+LEVELS = ["Auto", "Single", "Double", "Triple", "Quad"]
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
@@ -42,11 +43,17 @@ with st.sidebar:
                          help="Needed to tell Toe Loop apart from Flip/Lutz (which toe picks).")
     hint = st.selectbox("Jump you're practising (optional)", ["Auto-detect"] + C.JUMP_TYPES[:-1],
                         help="Used as a tie-breaker when the take-off is ambiguous.")
+    level_name = st.selectbox("Rotations attempted (optional)", LEVELS,
+                              help="E.g. pick Triple if you were working on 3S / 3A. A short jump is then "
+                                   "called under-rotated (3A<, 3A<<) instead of being read as a smaller jump. "
+                                   "Jumps that clearly don't match are still auto-detected.")
+    level = LEVELS.index(level_name) or None
     with st.expander("Advanced"):
         variant = st.select_slider("Pose model", ["lite", "full", "heavy"], value="full",
                                    help="lite = fastest, heavy = most accurate (slow on long videos).")
-        max_fps = st.select_slider("Max analysis fps", [30, 60, 120, 240], value=60,
-                                   help="Higher keeps more frames from slow-mo videos (better rotation counts, slower).")
+        max_fps = st.select_slider("Max analysis fps", [30, 60, 120, 240], value=120,
+                                   help="Higher keeps more frames from slow-mo videos (better rotation counts for "
+                                        "triples and quads, but slower). Normal 30/60 fps videos are unaffected.")
         max_width = st.select_slider("Processing width (px)", [480, 640, 960], value=640)
     st.divider()
     st.markdown("""**🎥 Filming tips**
@@ -144,10 +151,11 @@ if "track" not in st.session_state:
     st.stop()
 
 tr = st.session_state.track
-rep_key = (track_key, ccw, hint)
+rep_key = (track_key, ccw, hint, level)
 if st.session_state.get("report_key") != rep_key or "report" not in st.session_state:
-    st.session_state.report = analyze(tr, ccw_skater=ccw, hint=hint, height_m=height_cm / 100)
+    st.session_state.report = analyze(tr, ccw_skater=ccw, hint=hint, height_m=height_cm / 100, level=level)
     st.session_state.report_key = rep_key
+    st.session_state.jump_levels = {}
 R = st.session_state.report
 S = R["signals"]
 jumps, spins, sm = R["jumps"], R["spins"], R["summary"]
@@ -224,10 +232,16 @@ with t_jumps:
                 call_txt = {"clean": "✅ Fully rotated", "q": "🟡 Quarter short (q)",
                             "<": "🟠 Under-rotated (<)", "<<": "🔴 Downgraded (<<)"}[j.rotation_call]
                 st.markdown(call_txt + (f" · BV ≈ {j.base_value:.2f}" if j.base_value is not None else ""))
+                jl = st.session_state.setdefault("jump_levels", {})
                 new_type = st.selectbox("Jump type (correct me if wrong)", C.JUMP_TYPES,
                                         index=C.JUMP_TYPES.index(j.jump_type), key=f"type_{j.n}")
-                if new_type != j.jump_type:
-                    regrade_jump(S, j, new_type)
+                new_lvl = st.selectbox("Rotations attempted", LEVELS, index=jl.get(j.n, 0), key=f"lvl_{j.n}",
+                                       help="Set this if you tried e.g. a triple but it came out short — "
+                                            "it will be called 3A< / 3A<< instead of 2A.")
+                new_lvl_i = LEVELS.index(new_lvl)
+                if new_type != j.jump_type or new_lvl_i != jl.get(j.n, 0):
+                    jl[j.n] = new_lvl_i
+                    regrade_jump(S, j, new_type, new_lvl_i or level)
                     st.session_state.report = build_report(S, jumps, spins, height_cm / 100)
                     st.rerun()
                 st.caption(f"Type confidence {j.type_confidence:.0%} (else maybe {j.type_alternative}). "

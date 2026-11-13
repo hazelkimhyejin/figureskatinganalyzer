@@ -39,7 +39,7 @@ BASE_VALUES = {
 UNDER_ROTATED_FACTOR = 0.80  # "<" call keeps 80% of base value
 
 # Rough air-time targets (seconds) by number of rotations, for feedback.
-AIR_TIME_TARGET = {0.5: 0.35, 1.0: 0.40, 1.5: 0.45, 2.0: 0.52, 2.5: 0.56, 3.0: 0.62, 3.5: 0.66, 4.0: 0.70}
+AIR_TIME_TARGET = {0.5: 0.35, 1.0: 0.40, 1.5: 0.45, 2.0: 0.52, 2.5: 0.56, 3.0: 0.62, 3.5: 0.66, 4.0: 0.70, 4.5: 0.74}
 
 # Rotation-shortfall thresholds (in revolutions) for ISU-style calls
 Q_SHORT = 0.20        # >= this: quarter short ("q")

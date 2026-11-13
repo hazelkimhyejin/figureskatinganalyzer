@@ -13,7 +13,7 @@ BASE = {
 }
 
 
-def body(tuck=0.0, knee=0.0, split=0.0, pick_left=None):
+def body(tuck=0.0, knee=0.0, split=0.0, pick_left=None, free_lift=0.0):
     pts = {k: np.array(v, float) for k, v in BASE.items()}
     for w, e in ((15, 13), (16, 14)):
         s = np.sign(pts[w][0])
@@ -31,6 +31,7 @@ def body(tuck=0.0, knee=0.0, split=0.0, pick_left=None):
         side = (27, 29, 31, 25) if pick_left else (28, 30, 32, 26)
         for k in side:
             pts[k][2] -= 0.55 * split
+            pts[k][1] += free_lift * (0.5 if k in (25, 26) else 1.0)
     # fill face (1-10) from the nose and fingers (17-22) from the wrists, like MediaPipe would
     for k in range(1, 11):
         pts[k] = pts[0] + np.array([0.03 * ((k % 2) * 2 - 1), 0.02, 0])
@@ -41,7 +42,7 @@ def body(tuck=0.0, knee=0.0, split=0.0, pick_left=None):
     return pts
 
 
-def render(frames, fps, scale=200.0, W=1280, H=720, noise=0.004, seed=0):
+def render(frames, fps, scale=200.0, W=1280, H=720, noise=0.004, seed=0, world_noise=0.01):
     """frames: list of dict(x, lift, yaw, tuck, knee, split, pick_left)."""
     rng = np.random.default_rng(seed)
     T = len(frames)
@@ -49,7 +50,8 @@ def render(frames, fps, scale=200.0, W=1280, H=720, noise=0.004, seed=0):
     world = np.zeros((T, 33, 3), np.float32)
     ground = H * 0.8
     for i, f in enumerate(frames):
-        pts = body(f.get("tuck", 0), f.get("knee", 0), f.get("split", 0), f.get("pick_left"))
+        pts = body(f.get("tuck", 0), f.get("knee", 0), f.get("split", 0), f.get("pick_left"),
+                   f.get("free_lift", 0))
         c, s = np.cos(f["yaw"]), np.sin(f["yaw"])
         for k, (x, y, z) in pts.items():
             xr, zr = x * c - z * s, x * s + z * c
@@ -57,7 +59,7 @@ def render(frames, fps, scale=200.0, W=1280, H=720, noise=0.004, seed=0):
             img[i, k, 0] = f["x"] * scale + xr * scale + rng.normal(0, noise * scale)
             img[i, k, 1] = ground - (y + 0.93 + f["lift"]) * scale + rng.normal(0, noise * scale)
             img[i, k, 2] = 0.95
-        world[i] += rng.normal(0, 0.01, world[i].shape)
+        world[i] += rng.normal(0, world_noise, world[i].shape)
     t = np.arange(T) / fps
     return PoseTrack(fps=fps, src_fps=fps, width=W, height=H, frame_idx=np.arange(T), t=t,
                      img=img, world=world, valid=np.ones(T, bool), pan=np.zeros((T, 2), np.float32))
@@ -105,4 +107,67 @@ def program(fps=60, axel_rev=1.5, toe_rev=1.0, spin=True, airtime=0.5):
         for k in range(int(3.0 * fps)):
             F.append(dict(x=x, lift=0, yaw=yaw - 2 * np.pi * 2.5 * k / fps, tuck=0.6))
         glide(1.0, yaw, 1.0)
+    return F
+
+
+# ------------------------------------------------------------------ element programs
+ENTRIES = ("axel", "toe_loop", "salchow", "loop", "flip", "lutz")
+
+
+def elements_program(elements, fps=60, speed=3.0):
+    """elements: list of (entry, revolutions, air_time). Returns frames.
+
+    Rotation in the air follows a realistic profile: slower just after take-off
+    and before landing, about 1.3x the average rate mid-flight.
+    """
+    F = []
+    st = {"x": 0.5, "yaw": FACE_LEFT}
+
+    def add(n, vel, yaw_fn=None, **kw):
+        for k in range(n):
+            st["x"] += vel / fps
+            if yaw_fn is not None:
+                st["yaw"] = yaw_fn(k, n)
+            F.append(dict(x=st["x"], lift=0, yaw=st["yaw"], **{
+                key: (v(k, n) if callable(v) else v) for key, v in kw.items()}))
+
+    def turn_to(target, sec=1.2):
+        y0 = st["yaw"]
+        d = (target - y0 + np.pi) % (2 * np.pi) - np.pi
+        add(int(sec * fps), speed, yaw_fn=lambda k, n: y0 + d * (k + 1) / n)
+
+    for entry, rev, air in elements:
+        fwd = entry == "axel"
+        turn_to(FACE_RIGHT if fwd else FACE_LEFT)
+        add(int(0.8 * fps), speed)
+        n_pre = int(0.5 * fps)
+        if entry == "axel":
+            add(n_pre, speed, knee=lambda k, n: min(1, 2 * k / n) * 0.9)
+        elif entry in ("toe_loop", "flip", "lutz"):
+            left = entry == "toe_loop"
+            y0 = st["yaw"]
+            yaw_fn = (lambda k, n: y0 + 0.45 * min(1, k / (0.7 * n))) if entry == "lutz" else None
+            add(int(0.2 * fps), speed, yaw_fn=yaw_fn, knee=0.8)
+            add(n_pre - int(0.2 * fps), speed, yaw_fn=(lambda k, n: y0 + 0.45) if entry == "lutz" else None,
+                knee=0.8, split=1.0, pick_left=left)
+        elif entry == "salchow":
+            n_sweep = int(0.12 * fps)
+            add(n_pre - n_sweep, speed, knee=0.8, split=1.3, pick_left=False, free_lift=0.25)
+            add(n_sweep, speed, knee=0.8, split=lambda k, n: 1.3 * (1 - (k + 1) / n),
+                pick_left=False, free_lift=lambda k, n: 0.25 * (1 - (k + 1) / n))
+        elif entry == "loop":
+            add(n_pre, speed, knee=0.8)
+        # flight
+        n = max(2, int(round(air * fps)))
+        y0 = st["yaw"]
+        for k in range(n):
+            u = (k + 0.5) / n
+            st["x"] += speed / fps
+            prog = u - 0.3 * np.sin(2 * np.pi * u) / (2 * np.pi)
+            F.append(dict(x=st["x"], lift=9.81 * air ** 2 / 2 * u * (1 - u),
+                          yaw=y0 - 2 * np.pi * rev * prog, tuck=min(1, u * 5)))
+        st["yaw"] = y0 - 2 * np.pi * rev
+        add(int(0.3 * fps), speed * 0.8, knee=0.6, split=1.0, pick_left=True)
+        add(int(1.0 * fps), speed * 0.8, split=1.0, pick_left=True)
+    add(int(0.8 * fps), speed * 0.5)
     return F

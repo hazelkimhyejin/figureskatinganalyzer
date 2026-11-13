@@ -132,6 +132,7 @@ class Signals:
     wrist_dist: np.ndarray   # max wrist distance from shoulder centre, TL
     wrist_span: np.ndarray   # distance wrist-to-wrist, TL
     ankle_sep: np.ndarray    # TL
+    ankle_sep3d: np.ndarray  # TL, from 3D world landmarks (camera-angle independent)
     sh_width: np.ndarray     # image shoulder width / TL
     toe_dir: np.ndarray      # (T,) x-direction the lower foot's toes point (+1/-1/0)
     face_x: np.ndarray       # world forward-vector x component
@@ -190,6 +191,10 @@ def compute_signals(tr: PoseTrack) -> Signals:
     wd = np.maximum(np.linalg.norm(P[:, C.L_WRIST] - sh, axis=1), np.linalg.norm(P[:, C.R_WRIST] - sh, axis=1)) / TL
     span = np.linalg.norm(P[:, C.L_WRIST] - P[:, C.R_WRIST], axis=1) / TL
     asep = np.linalg.norm(P[:, C.L_ANKLE] - P[:, C.R_ANKLE], axis=1) / TL
+    torso_w = np.linalg.norm((W[:, C.L_SHOULDER] + W[:, C.R_SHOULDER]) / 2 - (W[:, C.L_HIP] + W[:, C.R_HIP]) / 2, axis=1)
+    torso_w = np.nanmedian(torso_w) if np.isfinite(torso_w).any() else np.nan
+    asep3 = np.linalg.norm(W[:, C.L_ANKLE] - W[:, C.R_ANKLE], axis=1) / torso_w
+    asep3 = np.where(np.isfinite(asep3), asep3, asep)
     shw = np.abs(P[:, C.R_SHOULDER, 0] - P[:, C.L_SHOULDER, 0]) / TL
 
     lower_is_L = P[:, C.L_ANKLE, 1] >= P[:, C.R_ANKLE, 1]
@@ -202,7 +207,7 @@ def compute_signals(tr: PoseTrack) -> Signals:
     face_x = fwd[:, 0]
 
     return Signals(fps, tr.t, okP, P, vis, TL, foot_rel, hip_rel, foot_base, vx, vy, speed, yaw2,
-                   knee_L, knee_R, tilt, wd, span, asep, shw, toe_dir, face_x)
+                   knee_L, knee_R, tilt, wd, span, asep, asep3, shw, toe_dir, face_x)
 
 
 # ----------------------------------------------------------------- results
@@ -263,9 +268,27 @@ class Spin:
 
 
 # ----------------------------------------------------------------- jumps
-def _nominal(rev: float, jtype: str) -> float:
+def _nominal_from_level(level: int, jtype: str) -> float:
     if jtype == "Waltz jump":
         return 0.5
+    return level + 0.5 if jtype == "Axel" else float(level)
+
+
+def _nominal(rev: float, jtype: str, level: int | None = None) -> float:
+    """Revolutions the jump was meant to have.
+
+    With ``level`` (1=single … 4=quad) the attempted jump is known, so a short
+    jump is called under-rotated instead of being read as a smaller jump.
+    Without it, pick the closest jump, leaning upward because take-off and
+    landing usually turn a little on the ice.
+    """
+    if jtype == "Waltz jump":
+        return 0.5
+    if level:
+        nom = _nominal_from_level(level, jtype)
+        # only trust the stated level if the measurement is plausibly that attempt
+        if -0.4 <= nom - rev <= 1.0:
+            return nom
     if jtype == "Axel":
         options = [1.5, 2.5, 3.5, 4.5]
     else:
@@ -290,15 +313,14 @@ def _code(jtype: str, nominal: float, call: str) -> tuple[str, float | None]:
     if jtype in ("Waltz jump", "Unknown"):
         return abbr, None
     lvl = int(round(nominal - 0.5)) if jtype == "Axel" else int(round(nominal))
+    code = f"{lvl}{abbr}" + {"<": "<", "<<": "<<", "q": "q"}.get(call, "")
     if call == "<<":
-        if lvl <= 1:
-            return f"{lvl}{abbr}<<", None
-        lvl -= 1
-    base = f"{lvl}{abbr}"
-    bv = C.BASE_VALUES.get(base)
+        # downgraded: shown as the attempted jump, valued as one rotation fewer
+        return code, (C.BASE_VALUES.get(f"{lvl - 1}{abbr}") if lvl > 1 else None)
+    bv = C.BASE_VALUES.get(f"{lvl}{abbr}")
     if bv is not None and call == "<":
         bv = round(bv * C.UNDER_ROTATED_FACTOR, 2)
-    return base + {"<": "<", "<<": "<<", "q": "q"}.get(call, ""), bv
+    return code, bv
 
 
 def _classify(S: Signals, to: int, rev: float, air_dir: float, ccw_skater: bool) -> tuple[str, float, str, list]:
@@ -335,11 +357,11 @@ def _classify(S: Signals, to: int, rev: float, air_dir: float, ccw_skater: bool)
     foot_y = S.P[w][:, [C.L_ANKLE, C.R_ANKLE], 1]
     near_ice = np.abs(foot_y - S.foot_base[w, None]) < 0.25 * S.TL[w, None]
     both_down = near_ice.all(axis=1)
-    sep = S.ankle_sep[w]
+    sep = np.fmax(S.ankle_sep[w], S.ankle_sep3d[w])
     toe_frames = both_down & (sep > 0.85)
     toe_score = float(toe_frames.mean()) if len(toe_frames) else 0.0
-    sep_early = _nanmax(S.ankle_sep[a:max(a + 1, to - int(0.15 * fps))], 0)
-    sep_late = _nanmean(S.ankle_sep[max(0, to - int(0.1 * fps)):to + 1], 0)
+    sep_early = _nanmax(S.ankle_sep3d[a:max(a + 1, to - int(0.15 * fps))], 0)
+    sep_late = _nanmean(S.ankle_sep3d[max(0, to - int(0.1 * fps)):to + 1], 0)
 
     if toe_score > 0.15:
         reasons.append("both feet on the ice, wide apart just before take-off → toe pick")
@@ -356,7 +378,9 @@ def _classify(S: Signals, to: int, rev: float, air_dir: float, ccw_skater: bool)
             return "Toe Loop", 0.5 + 0.3 * min(1, toe_score * 2), "Flip", reasons
         # flip vs lutz: counter-rotation before take-off = Lutz
         pre = slice(max(0, to - int(0.6 * fps)), max(1, to - int(0.15 * fps)))
-        pre_turn = (S.yaw2[pre][-1] - S.yaw2[pre][0]) if (pre.stop - pre.start) > 2 else 0.0
+        k = max(2, int(0.08 * fps))
+        seg = S.yaw2[pre]
+        pre_turn = float(np.mean(seg[-k:]) - np.mean(seg[:k])) if len(seg) > 2 * k else 0.0
         counter = np.sign(pre_turn) != np.sign(air_dir) and abs(pre_turn) > 0.6
         reasons.append(f"picking with the {'left' if pick_left else 'right'} toe → Flip/Lutz pattern")
         if counter:
@@ -526,7 +550,8 @@ def _jump_issues(S: Signals, j: Jump, to: int, ld: int, T: int):
     return issues, strengths
 
 
-def detect_jumps(S: Signals, ccw_skater: bool = True, hint: str | None = None) -> list[Jump]:
+def detect_jumps(S: Signals, ccw_skater: bool = True, hint: str | None = None,
+                 level: int | None = None) -> list[Jump]:
     fps, T = S.fps, len(S.t)
     if T < 5:
         return []
@@ -557,8 +582,7 @@ def detect_jumps(S: Signals, ccw_skater: bool = True, hint: str | None = None) -
         air_time = (ld - to + 1) / fps
         peak = to + int(np.argmax(fr[to:ld + 1]))
 
-        d2 = S.yaw2[ld] - S.yaw2[to]
-        rev = abs(d2) / (4 * np.pi)
+        d2, rev = _air_rotation(S.yaw2, to, ld)
         # cross-check with shoulder-width minima (2 per revolution)
         w = _smooth(S.sh_width[to:ld + 1], 3)
         mins = int(np.sum((w[1:-1] < w[:-2]) & (w[1:-1] < w[2:]) & (w[1:-1] < 0.6))) if len(w) > 3 else 0
@@ -566,8 +590,6 @@ def detect_jumps(S: Signals, ccw_skater: bool = True, hint: str | None = None) -
         agree = abs(rev - rev_w) <= 0.5 or mins == 0
         frames_per_rev = fps / max(rev / max(air_time, 1e-3), 1e-3)
         conf = "high" if agree and frames_per_rev >= 12 else ("medium" if agree or frames_per_rev >= 12 else "low")
-        if not agree and rev_w > 0 and conf == "low":
-            rev = (rev + rev_w) / 2
 
         jtype, tconf, alt, reasons = _classify(S, to, rev, np.sign(d2), ccw_skater)
         if hint and hint != "Auto-detect" and tconf < 0.65 and hint in (jtype, alt):
@@ -576,7 +598,7 @@ def detect_jumps(S: Signals, ccw_skater: bool = True, hint: str | None = None) -
                 jtype, alt = hint, jtype
             tconf = max(tconf, 0.65)
 
-        nominal = _nominal(rev, jtype)
+        nominal = _nominal(rev, jtype, level)
         call = _rotation_call(nominal - rev)
         code, bv = _code(jtype, nominal, call)
 
@@ -610,12 +632,42 @@ def detect_jumps(S: Signals, ccw_skater: bool = True, hint: str | None = None) -
     return jumps
 
 
-def regrade_jump(S: Signals, j: Jump, new_type: str) -> Jump:
-    """Re-score a jump after the user corrects its type."""
+def _air_rotation(yaw2: np.ndarray, to: int, ld: int) -> tuple[float, float]:
+    """Revolutions turned between take-off and landing.
+
+    Uses a direction-aware unwrap: in the air a skater only turns one way, so a
+    per-frame step is read in the jump's direction unless it is a small step
+    backwards (noise). This doubles the speed we can follow compared with plain
+    unwrapping — about 0.37 rev per frame, i.e. ~11 rev/s even at 30 fps.
+    Half a frame is added at each end because take-off and landing happen
+    between frames.
+    """
+    T = len(yaw2)
+    a, b = max(0, to - 1), min(T - 1, ld + 1)
+    seg = yaw2[a:b + 1]
+    if len(seg) < 3:
+        d = float(yaw2[ld] - yaw2[to])
+        return d, abs(d) / (4 * np.pi)
+    wrapped = np.angle(np.exp(1j * seg))
+    raw = np.angle(np.exp(1j * np.diff(wrapped)))          # plain unwrap steps, (-pi, pi]
+    direction = np.sign(np.median(raw)) or np.sign(raw.sum()) or 1.0
+    steps = np.mod(direction * raw + np.pi / 2, 2 * np.pi) - np.pi / 2   # (-pi/2, 3pi/2]
+    steps = direction * steps
+    cum = np.concatenate([[0.0], np.cumsum(steps)])
+    i_to, i_ld = to - a, ld - a
+    start = cum[i_to] - (0.5 * (cum[i_to] - cum[i_to - 1]) if i_to > 0 else 0.0)
+    end = cum[i_ld] + (0.5 * (cum[i_ld + 1] - cum[i_ld]) if i_ld + 1 < len(cum) else 0.0)
+    d = float(end - start)
+    return d, abs(d) / (4 * np.pi)
+
+
+def regrade_jump(S: Signals, j: Jump, new_type: str, level: int | None = None) -> Jump:
+    """Re-score a jump after the user corrects its type and/or rotations attempted."""
+    if new_type != j.jump_type:
+        j.type_confidence = 1.0
+        j.type_reasons = [r for r in j.type_reasons if r != "type set by you"] + ["type set by you"]
     j.jump_type = new_type
-    j.type_confidence = 1.0
-    j.type_reasons = j.type_reasons + ["type set by you"]
-    j.nominal_rev = _nominal(j.rev_measured, new_type)
+    j.nominal_rev = _nominal_from_level(level, new_type) if level else _nominal(j.rev_measured, new_type)
     j.rotation_call = _rotation_call(j.nominal_rev - j.rev_measured)
     j.code, j.base_value = _code(new_type, j.nominal_rev, j.rotation_call)
     j.issues, j.strengths = _jump_issues(S, j, j.takeoff_i, j.landing_i, len(S.t))
@@ -674,9 +726,9 @@ def detect_spins(S: Signals, jumps: list[Jump]) -> list[Spin]:
 
 # ----------------------------------------------------------------- report
 def analyze(tr: PoseTrack, ccw_skater: bool = True, hint: str | None = None,
-            height_m: float | None = None) -> dict:
+            height_m: float | None = None, level: int | None = None) -> dict:
     S = compute_signals(tr)
-    jumps = detect_jumps(S, ccw_skater, hint)
+    jumps = detect_jumps(S, ccw_skater, hint, level)
     spins = detect_spins(S, jumps)
     return build_report(S, jumps, spins, height_m)
 

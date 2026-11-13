@@ -8,7 +8,7 @@ speed into and out of the jump, and the specific technique fixes to work on.
 
 | | |
 |---|---|
-| **Detects** | Axel, Toe Loop, Salchow, Loop, Flip, Lutz, Waltz jump, combinations, spins (upright / sit / camel) |
+| **Detects** | Axel, Toe Loop, Salchow, Loop, Flip, Lutz, Waltz jump — singles through quads (2S, 3S, 3A, 4A, 4Lz…), combinations, spins (upright / sit / camel) |
 | **Measures** | Rotations, air time, jump height, rotation speed (rev/s), approach / take-off / exit speed (km/h), distance, knee bend, arm-tuck timing, air position, axis tilt |
 | **Calls** | ISU-style rotation calls — clean, `q`, `<`, `<<` — falls / hand-downs, and an estimated base value |
 | **Coaches** | Ranked "what to work on" list with tips, "what's working", per-jump issues, slow-motion clips with skeleton overlay and live rotation counter |
@@ -17,19 +17,25 @@ speed into and out of the jump, and the specific technique fixes to work on.
 If the app names a jump wrong, pick the right one in the **Jumps** tab — the
 rotation call, base value and feedback re-score instantly.
 
+**Rotations attempted.** A jump measured at 2.9 revolutions could be an
+over-rotated 2A or a downgraded 3A — the video alone can't tell what you were
+going for. Set *Rotations attempted* (sidebar for the whole session, or per jump)
+and short jumps are called the ISU way: `3A<` (under-rotated, 80% of base value)
+or `3A<<` (downgraded, valued as a 2A).
+
 ## How it works
 
 1. **Pose tracking** — Google MediaPipe PoseLandmarker finds 33 body points in every frame (2D image points + 3D body-centred points).
 2. **Camera compensation** — background optical flow estimates how the camera pans, so speed is measured against the ice, not the screen.
 3. **Jump detection** — the lowest foot leaving the ice line marks take-off and landing; air time gives height (h = g·t²/8).
-4. **Rotation counting** — body yaw from the 3D shoulder/hip line is unwrapped through the flight (using the doubled angle, so left/right label swaps when your back faces the camera don't break the count), cross-checked against shoulder-width oscillation.
-5. **Jump type** — forward take-off → Axel; toe pick (both feet down, wide apart) → Toe Loop vs Flip/Lutz by which toe picks; counter-rotation before take-off → Lutz; edge jumps split into Salchow (free-leg sweep) vs Loop (legs crossed).
+4. **Rotation counting** — body yaw from the 3D shoulder/hip line is tracked through the flight with a direction-aware unwrap (a skater only turns one way in the air), so it can follow up to ~0.37 rev per frame — about 11 rev/s even at 30 fps, enough for quads. The doubled angle makes it immune to left/right label swaps when your back faces the camera. Half a frame is added at each end because take-off and landing happen between frames.
+5. **Jump type** — leg positions are measured in 3D so they don't depend on camera angle. Forward take-off → Axel; toe pick (both feet down, wide apart) → Toe Loop vs Flip/Lutz by which toe picks; counter-rotation before take-off → Lutz; edge jumps split into Salchow (free-leg sweep) vs Loop (legs crossed).
 6. **Feedback rules** — each measurement is compared with coaching targets (see `skate/constants.py` and `_jump_issues` in `skate/analysis.py`); tweak them to match your coach.
 
 ## Getting the best results
 
 - Film **side-on** with the whole body in frame, camera following smoothly.
-- Use **phone slow-mo (120/240 fps)** — fast rotations at 30 fps are only sampled a few times per turn.
+- Use **phone slow-mo (120/240 fps)** for triples and quads. Counting works at 30 fps, but each turn is only sampled ~5 times, so real-world blur makes it less reliable.
 - One skater in the shot. Set your **height** in the sidebar for accurate km/h.
 - Long videos work; use the time slider to analyse just the part you care about.
 
