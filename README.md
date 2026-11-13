@@ -78,7 +78,8 @@ git push -u origin main
 4. **Advanced settings → Python version: 3.12**.
 5. Deploy. First build takes a few minutes (MediaPipe is large).
 
-`packages.txt` installs the system libraries MediaPipe/OpenCV need, and
+`packages.txt` installs the system libraries MediaPipe/OpenCV need (including the
+OpenGL/EGL libraries — without them you get `libEGL.so.1: cannot open shared object file`), and
 `.streamlit/config.toml` raises the upload limit to 1 GB.
 
 ### Notes for the cloud
